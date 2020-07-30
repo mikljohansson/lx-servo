@@ -12,8 +12,9 @@ class LxServo {
     attach(HardwareSerial &serial, uint8_t id);
     attach(SoftwareSerial &serial, uint8_t id);
 
-    void write(int16_t position, uint16_t time);
-    void move(float angle, float speed);
+    void write(int16_t position, uint16_t duration);
+    long move(float degrees, float speed);
+    void grip(float degrees, float speed, float maxamps);
     void stop();
     
     void setID(uint8_t newID);
@@ -22,10 +23,10 @@ class LxServo {
     void load();
     void unload();
 
-    int angle();
+    float angle();
     int read();
-    int vin();
-    int temperature();
+    float vin();
+    float temperature();
 
   private:
     HardwareSerial *_hws;

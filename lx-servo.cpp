@@ -40,6 +40,7 @@
 #define LOBOT_SERVO_LED_ERROR_READ       36
 
 #define LOBOT_SERVO_MAX_ANGLE 240.0
+#define LOBOT_SERVO_VIN_RESISTANCE 0.5
 
 //#define LOBOT_DEBUG 1  /*调试是用，打印调试数据*/
 
@@ -68,7 +69,7 @@ byte LobotCheckSum(byte buf[]) {
   return i;
 }
 
-void LxServo::write(int16_t position, uint16_t time) {
+void LxServo::write(int16_t position, uint16_t duration) {
   byte buf[10];
   if(position < 0)
     position = 0;
@@ -80,18 +81,76 @@ void LxServo::write(int16_t position, uint16_t time) {
   buf[4] = LOBOT_SERVO_MOVE_TIME_WRITE;
   buf[5] = GET_LOW_BYTE(position);
   buf[6] = GET_HIGH_BYTE(position);
-  buf[7] = GET_LOW_BYTE(time);
-  buf[8] = GET_HIGH_BYTE(time);
+  buf[7] = GET_LOW_BYTE(duration);
+  buf[8] = GET_HIGH_BYTE(duration);
   buf[9] = LobotCheckSum(buf);
   serialWrite(buf, 10);
 }
 
-void LxServo::move(float angle, float speed) {
+long LxServo::move(float degrees, float speed) {
   int currentpos = read();
   if (currentpos > -2048) {
-    int targetpos = angle * 1000.0 / LOBOT_SERVO_MAX_ANGLE;
-    int duration = (float)abs(targetpos - currentpos) / ((1000.0 * 360.0 / LOBOT_SERVO_MAX_ANGLE) / 60000.0 * speed);
+    int targetpos = degrees * 1000.0 / LOBOT_SERVO_MAX_ANGLE;
+    uint16_t duration = (float)abs(targetpos - currentpos) / ((1000.0 * 360.0 / LOBOT_SERVO_MAX_ANGLE) / 60000.0 * speed);
     write(targetpos, duration);
+    return duration;
+  }
+
+  return -2048;
+}
+
+void LxServo::grip(float degrees, float speed, float maxamps) {
+  // Stop to get a clean VIN measurement at rest
+  stop();
+  delay(100);
+  float vinrest = vin();
+  int posrest = read();
+
+  // Start gripping
+  long duration = move(degrees, speed);
+  if (duration <= -2048) {
+    return;
+  }
+
+  // Detect when blocking occurs
+  float avgvin = vinrest;
+  float amps;
+  unsigned long ts = millis(), endts = millis() + min(duration * 5, 30000);
+  
+  while (ts < endts) {
+    avgvin = avgvin * 0.9 + (float)vin() * 0.1;
+    amps = (vinrest - avgvin) * LOBOT_SERVO_VIN_RESISTANCE;
+
+    // Detect when average current goes over the max
+    if (amps >= maxamps) {
+      int pos = read();
+
+      // Try to backoff 1 unit at a time
+      for (int i = 0; i < 750 && posrest != pos; i++) {
+        write(pos + (posrest < pos ? -1 : 1), 3);
+        delay(1);
+
+        // .. until the realtime current measurement goes below the max again
+        amps = (vinrest - vin()) * LOBOT_SERVO_VIN_RESISTANCE;
+        if ((int)(amps * 100) == (int)(maxamps * 100)) {
+          return;
+        }
+        
+        if (amps < maxamps) {
+          // Apply suitable torque again to hold the object securely
+          pos = read();
+          write(pos + (posrest < pos ? 1 : -1), 3);
+          return;
+        }
+
+        pos = read();
+      }
+      
+      return;
+    }
+    
+    delay(1);
+    ts = millis();
   }
 }
 
@@ -204,7 +263,7 @@ void LxServo::unload() {
 #endif
 }
 
-int LxServo::angle() {
+float LxServo::angle() {
   int pos = read();
   if (pos > -2048) {
     return (float)pos * LOBOT_SERVO_MAX_ANGLE / 1000.0;
@@ -255,7 +314,7 @@ int LxServo::read() {
   return ret;
 }
 
-int LxServo::vin() {
+float LxServo::vin() {
   int count = 10000;
   int ret;
   byte buf[6];
@@ -285,22 +344,22 @@ int LxServo::vin() {
   while (!serialAvailable()) {
     count -= 1;
     if (count < 0)
-      return -2048;
+      return 0;
   }
 
   if (receiveHandle(buf) > 0)
     ret = (int16_t)BYTE_TO_HW(buf[2], buf[1]);
   else
-    ret = -2049;
+    ret = 0;
 
 #ifdef LOBOT_DEBUG
   Serial.println(ret);
 #endif
-  return ret;
+  return (float)ret / 1000.0;
 }
 
 
-int LxServo::temperature() {
+float LxServo::temperature() {
   int count = 10000;
   int ret;
   byte buf[6];
