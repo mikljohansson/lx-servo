@@ -44,14 +44,14 @@
 
 //#define LOBOT_DEBUG 1  /*调试是用，打印调试数据*/
 
-LxServo::attach(HardwareSerial &serial, uint8_t id) {
+void LxServo::attach(HardwareSerial &serial, uint8_t id) {
   _hws = &serial;
   _sws = 0;
   _id = id;
   serial.begin(115200);
 }
     
-LxServo::attach(SoftwareSerial &serial, uint8_t id) {
+void LxServo::attach(SoftwareSerial &serial, uint8_t id) {
   _hws = 0;
   _sws = &serial;
   _id = id;
@@ -96,10 +96,10 @@ long LxServo::move(float degrees, float speed) {
     return duration;
   }
 
-  return -2048;
+  return currentpos;
 }
 
-void LxServo::grip(float degrees, float speed, float maxamps) {
+void LxServo::grip(float degrees, float speed, float stopamps, float holdamps) {
   // Stop to get a clean VIN measurement at rest
   stop();
   delay(100);
@@ -108,49 +108,77 @@ void LxServo::grip(float degrees, float speed, float maxamps) {
 
   // Start gripping
   long duration = move(degrees, speed);
-  if (duration <= -2048) {
+  if (duration <= -2048)
     return;
-  }
-
+  
   // Detect when blocking occurs
   float avgvin = vinrest;
   float amps;
-  unsigned long ts = millis(), endts = millis() + min(duration * 5, 30000);
   
-  while (ts < endts) {
-    avgvin = avgvin * 0.9 + (float)vin() * 0.1;
+  for (unsigned long ts = millis(), endts = ts + min(duration * 2, 30000); ts < endts; ts = millis()) {
+    delay(1);
+    avgvin = avgvin * 0.95 + (float)vin() * 0.05;
     amps = (vinrest - avgvin) * LOBOT_SERVO_VIN_RESISTANCE;
 
     // Detect when average current goes over the max
-    if (amps >= maxamps) {
+    if (amps >= stopamps) {
       int pos = read();
+      if (pos <= -2048)
+        return;
+
+#ifdef LOBOT_DEBUG
+      Serial.print("Detected blocked servo at amps:");
+      Serial.print(amps);
+      Serial.print(", position: ");
+      Serial.println(pos);
+#endif
 
       // Try to backoff 1 unit at a time
-      for (int i = 0; i < 750 && posrest != pos; i++) {
-        write(pos + (posrest < pos ? -1 : 1), 3);
-        delay(1);
+      for (int i = 0; i < 50 && posrest != pos; i++) {
+        if (pos <= -2048)
+          return;
 
-        // .. until the realtime current measurement goes below the max again
+        pos = pos + (posrest < pos ? 1 : -1);
+        write(pos, 1);
+        delay(10);
+
+        // .. until the realtime current measurement goes below the hold
         amps = (vinrest - vin()) * LOBOT_SERVO_VIN_RESISTANCE;
-        if ((int)(amps * 100) == (int)(maxamps * 100)) {
-          return;
+        if ((int)(amps * 100) <= (int)(holdamps * 100)) {
+#ifdef LOBOT_DEBUG
+          Serial.print("Backed off grip to amps:");
+          Serial.print(amps);
+          Serial.print(", position: ");
+          Serial.println(pos);
+#endif
+          break;
         }
-        
-        if (amps < maxamps) {
-          // Apply suitable torque again to hold the object securely
-          pos = read();
-          write(pos + (posrest < pos ? 1 : -1), 3);
-          return;
-        }
+      }
 
-        pos = read();
+      // Slowly apply torque until holding securely
+      for (int i = 0; i < 50 && posrest != pos; i++) {
+        if (pos <= -2048)
+          return;
+
+        pos = pos + (posrest < pos ? 1 : -1);
+        write(pos, 1);
+        delay(10);
+
+        // .. until the realtime current measurement goes below the hold
+        amps = (vinrest - vin()) * LOBOT_SERVO_VIN_RESISTANCE;
+        if ((int)(amps * 100) >= (int)(holdamps * 100)) {
+#ifdef LOBOT_DEBUG
+          Serial.print("Holding grip at amps:");
+          Serial.print(amps);
+          Serial.print(", position: ");
+          Serial.println(pos + (posrest < pos ? 1 : -1));
+#endif
+          break;
+        }
       }
       
       return;
     }
-    
-    delay(1);
-    ts = millis();
   }
 }
 
@@ -440,9 +468,14 @@ int LxServo::receiveHandle(byte *ret) {
   byte recvBuf[32];
   byte i;
 
-  while (serialAvailable()) {
+  long tsend = millis() + 100;
+  while (millis() < tsend) {
+    if (!serialAvailable()) {
+      delayMicroseconds(100);
+      continue;
+    }
+    
     rxBuf = serialRead();
-    delayMicroseconds(100);
     if (!frameStarted) {
       if (rxBuf == LOBOT_SERVO_FRAME_HEADER) {
         frameCount++;
@@ -458,6 +491,7 @@ int LxServo::receiveHandle(byte *ret) {
         frameCount = 0;
       }
     }
+    
     if (frameStarted) {
       recvBuf[dataCount] = (uint8_t)rxBuf;
       if (dataCount == 3) {

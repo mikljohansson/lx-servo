@@ -9,12 +9,12 @@ class SoftwareSerial;
 
 class LxServo {
   public:
-    attach(HardwareSerial &serial, uint8_t id);
-    attach(SoftwareSerial &serial, uint8_t id);
+    void attach(HardwareSerial &serial, uint8_t id);
+    void attach(SoftwareSerial &serial, uint8_t id);
 
     void write(int16_t position, uint16_t duration);
     long move(float degrees, float speed);
-    void grip(float degrees, float speed, float maxamps);
+    void grip(float degrees, float speed, float stopamps, float holdamps);
     void stop();
     
     void setID(uint8_t newID);
